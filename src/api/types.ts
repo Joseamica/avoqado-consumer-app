@@ -55,6 +55,13 @@ export type VenueDetail = VenueSummary & {
     requireEmail: boolean
   }
   operatingHours?: unknown
+  /** Scheduling window the venue configured. Optional so older/cached payloads
+   *  still type-check. maxAdvanceDays caps how far ahead the date rail goes. */
+  scheduling?: {
+    maxAdvanceDays: number
+    minNoticeMin: number
+    autoConfirm: boolean
+  }
 }
 
 export type VenueSearchResponse = {

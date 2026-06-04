@@ -144,9 +144,16 @@ export default function VenueDetailScreen() {
   const product = selectedProduct ?? venueQuery.data?.products[0] ?? null
   const isClass = product?.type === 'CLASS'
   const requiresPhone = venueQuery.data?.publicBooking.requirePhone ?? false
+  const requiresEmail = venueQuery.data?.publicBooking.requireEmail ?? false
+  // Defaults to true so older payloads (no flag) keep working.
+  const bookingEnabled = venueQuery.data?.publicBooking.enabled ?? true
+  // How far ahead the venue allows booking. Drives the date rail cap so the
+  // customer can reach every bookable day (was hardcoded to 14).
+  const maxAdvanceDays = venueQuery.data?.scheduling?.maxAdvanceDays ?? 14
   const venueTimezone = venueQuery.data?.timezone
   const seats = Math.max(1, Number(partySize) || 1)
   const contactPhone = phone.trim() || consumer?.phone || ''
+  const contactEmail = (consumer?.email ?? '').trim()
 
   const vertical = useMemo(
     () => detectVertical({ type: venueQuery.data?.type, name: venueQuery.data?.name, productType: product?.type ?? null }),
@@ -604,7 +611,7 @@ export default function VenueDetailScreen() {
                   </Pressable>
                 )
               })}
-              <Pressable accessibilityRole="button" accessibilityLabel="Ver más días" onPress={() => setClassDateOffset(v => Math.min(14, v + 1))} style={styles.dateChipMore}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Ver más días" onPress={() => setClassDateOffset(v => Math.min(maxAdvanceDays, v + 1))} style={styles.dateChipMore}>
                 <Text style={styles.dateChipMoreLabel}>Más</Text>
                 <Text style={styles.dateChipMoreSub}>días</Text>
               </Pressable>
@@ -698,7 +705,7 @@ export default function VenueDetailScreen() {
                   </Pressable>
                 )
               })}
-              <Pressable accessibilityRole="button" accessibilityLabel="Ver más días" onPress={() => setAppointmentDateOffset(v => Math.min(14, v + 1))} style={styles.dateChipMore}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Ver más días" onPress={() => setAppointmentDateOffset(v => Math.min(maxAdvanceDays, v + 1))} style={styles.dateChipMore}>
                 <Text style={styles.dateChipMoreLabel}>Más</Text>
                 <Text style={styles.dateChipMoreSub}>días</Text>
               </Pressable>
@@ -775,8 +782,16 @@ export default function VenueDetailScreen() {
               Alert.alert('Campos incompletos', `Completa: ${missingFields().join(', ')}`)
               return
             }
+            if (!bookingEnabled) {
+              Alert.alert('Reservas no disponibles', 'Este negocio no acepta reservas en línea por ahora. Contáctalo directamente.')
+              return
+            }
             if (requiresPhone && !contactPhone) {
               openPhoneModal()
+              return
+            }
+            if (requiresEmail && !contactEmail) {
+              Alert.alert('Correo requerido', 'Este negocio requiere un correo para reservar. Agrega un correo a tu cuenta e intenta de nuevo.')
               return
             }
             reservationMutation.mutate(undefined)

@@ -47,6 +47,10 @@ function formatMoney(amount: number) {
   return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(amount)
 }
 
+function queryErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback
+}
+
 function toApiDate(date: Date, timeZone?: string) {
   if (timeZone) {
     const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date)
@@ -618,7 +622,9 @@ export default function VenueDetailScreen() {
             </ScrollView>
 
             {classAvailabilityQuery.isLoading ? <ActivityIndicator color={accent.deep} style={styles.loader} /> : null}
-            {classAvailabilityQuery.isError ? <BodyText color={colors.danger}>No pudimos cargar horarios.</BodyText> : null}
+            {classAvailabilityQuery.isError ? (
+              <BodyText color={colors.danger}>{queryErrorMessage(classAvailabilityQuery.error, 'No pudimos cargar horarios.')}</BodyText>
+            ) : null}
             {!classAvailabilityQuery.isLoading && availableSlots.length === 0 ? (
               <EmptyState
                 kicker="Sin disponibilidad"
@@ -712,7 +718,9 @@ export default function VenueDetailScreen() {
             </ScrollView>
 
             {appointmentAvailabilityQuery.isLoading ? <ActivityIndicator color={accent.deep} style={styles.loader} /> : null}
-            {appointmentAvailabilityQuery.isError ? <BodyText color={colors.danger}>No pudimos cargar horarios.</BodyText> : null}
+            {appointmentAvailabilityQuery.isError ? (
+              <BodyText color={colors.danger}>{queryErrorMessage(appointmentAvailabilityQuery.error, 'No pudimos cargar horarios.')}</BodyText>
+            ) : null}
             {!appointmentAvailabilityQuery.isLoading && availableAppointmentSlots.length === 0 ? (
               <EmptyState
                 kicker="Sin disponibilidad"
@@ -861,7 +869,9 @@ export default function VenueDetailScreen() {
             </View>
 
             {creditBalancesQuery.isLoading ? <ActivityIndicator color={accent.deep} style={styles.loader} /> : null}
-            {creditBalancesQuery.isError ? <BodyText color={colors.danger}>No pudimos cargar tus créditos.</BodyText> : null}
+            {creditBalancesQuery.isError ? (
+              <BodyText color={colors.danger}>{queryErrorMessage(creditBalancesQuery.error, 'No pudimos cargar tus créditos.')}</BodyText>
+            ) : null}
 
             {eligibleBalances.length > 0 ? (
               <View style={styles.modalSection}>
@@ -914,7 +924,9 @@ export default function VenueDetailScreen() {
                 <Kicker color={colors.muted}>Comprar paquete</Kicker>
                 {creditPacksQuery.isLoading ? <ActivityIndicator color={accent.deep} /> : null}
               </View>
-              {creditPacksQuery.isError ? <BodyText color={colors.danger}>No pudimos cargar paquetes.</BodyText> : null}
+              {creditPacksQuery.isError ? (
+                <BodyText color={colors.danger}>{queryErrorMessage(creditPacksQuery.error, 'No pudimos cargar paquetes.')}</BodyText>
+              ) : null}
               <View style={styles.slotStack}>
                 {(creditPacksQuery.data ?? []).map(pack => (
                   <View key={pack.id} style={styles.packCard}>

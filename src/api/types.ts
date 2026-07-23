@@ -17,6 +17,38 @@ export type AuthResponse = {
 
 export type ProductType = 'APPOINTMENTS_SERVICE' | 'EVENT' | 'CLASS'
 
+export type Modifier = {
+  id: string
+  name: string
+  price: number
+  durationMin?: number | null
+  active: boolean
+}
+
+export type ModifierGroup = {
+  id: string
+  name: string
+  description?: string | null
+  required: boolean
+  allowMultiple: boolean
+  minSelections: number
+  maxSelections?: number | null
+  displayOrder: number
+  modifiers: Modifier[]
+}
+
+export type ModifierSelection = {
+  productId: string
+  modifierId: string
+  quantity: number
+}
+
+export type BookingStaff = {
+  id: string
+  name: string
+  photoUrl: string | null
+}
+
 export type Product = {
   id: string
   name: string
@@ -27,6 +59,7 @@ export type Product = {
   maxParticipants?: number | null
   layoutConfig?: unknown
   requireCreditForBooking?: boolean
+  modifierGroups?: ModifierGroup[]
 }
 
 export type VenueSummary = {
@@ -61,6 +94,11 @@ export type VenueDetail = VenueSummary & {
     maxAdvanceDays: number
     minNoticeMin: number
     autoConfirm: boolean
+  }
+  appointmentWindowSemantics?: 'base'
+  staffSelection?: {
+    enabled: true
+    staffByProductId: Record<string, BookingStaff[]>
   }
 }
 
@@ -169,6 +207,13 @@ export type ClassAvailabilitySlot = {
 export type ClassAvailabilityResponse = {
   date: string
   slots: ClassAvailabilitySlot[]
+}
+
+export type AppointmentHoldResponse = {
+  holdId: string
+  expiresAt: string
+  ttlSeconds: number
+  staffId?: string
 }
 
 export type CreditPackItem = {

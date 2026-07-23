@@ -20,6 +20,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
   createCreditPackCheckout,
+  createAppointmentHold,
   createReservation,
   finalizeCreditPackCheckout,
   finalizeReservationDepositCheckout,
@@ -28,8 +29,18 @@ import {
   getCreditBalance,
   getCreditPacks,
   getVenue,
+  releaseAppointmentHold,
 } from '../../../src/api/client'
-import type { CreditBalanceItem, CreditPack, Product } from '../../../src/api/types'
+import type { CreditBalanceItem, CreditPack, ModifierSelection, Product } from '../../../src/api/types'
+import {
+  appointmentWindowExpectedBase,
+  baseWindowFromFinalSlot,
+  modifierDurationDelta,
+  modifiersAreValid,
+  reconcileModifiers,
+  type ApiErrorShape,
+} from '../../../src/booking/appointmentContract'
+import { AppointmentModifierPicker, AppointmentStaffPicker } from '../../../src/components/AppointmentOptions'
 import { Avatar } from '../../../src/components/Avatar'
 import { BodyText } from '../../../src/components/BodyText'
 import { Button } from '../../../src/components/Button'
@@ -129,14 +140,28 @@ export default function VenueDetailScreen() {
   const [notes, setNotes] = useState('')
   const [selectedClassSessionId, setSelectedClassSessionId] = useState<string | null>(null)
   const [selectedAppointmentSlotKey, setSelectedAppointmentSlotKey] = useState<string | null>(null)
+  const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null)
+  const [selectedModifiers, setSelectedModifiers] = useState<ModifierSelection[]>([])
+  const [appointmentHoldId, setAppointmentHoldId] = useState<string | null>(null)
+  const [appointmentHoldExpiresAt, setAppointmentHoldExpiresAt] = useState<number | null>(null)
+  const [heldStaffId, setHeldStaffId] = useState<string | null>(null)
+  const [holdReleaseFailed, setHoldReleaseFailed] = useState(false)
+  const [appointmentHoldPending, setAppointmentHoldPending] = useState(false)
+  const appointmentHoldIdRef = useRef<string | null>(null)
+  const activeHoldReleaseRef = useRef<Promise<boolean> | null>(null)
+  const pendingHoldReleaseActionRef = useRef<(() => void | Promise<void>) | null>(null)
+  const baseDurationOverrideRef = useRef<{ productId: string; duration: number } | null>(null)
   const [selectedCreditBalanceId, setSelectedCreditBalanceId] = useState<string | null>(null)
   const [classDateOffset, setClassDateOffset] = useState(1)
   const [appointmentDateOffset, setAppointmentDateOffset] = useState(1)
   const [creditModalVisible, setCreditModalVisible] = useState(false)
 
-  const goBackOrHome = () => {
-    if (router.canGoBack()) router.back()
-    else router.replace('/')
+  const goBackOrHome = async () => {
+    const navigate = () => {
+      if (router.canGoBack()) router.back()
+      else router.replace('/')
+    }
+    await runAfterHoldRelease(navigate)
   }
 
   const venueQuery = useQuery({
@@ -169,13 +194,135 @@ export default function VenueDetailScreen() {
   const classDate = useMemo(() => toApiDate(classDateObj, venueTimezone), [classDateObj, venueTimezone])
   const appointmentDateObj = useMemo(() => addDays(new Date(), appointmentDateOffset), [appointmentDateOffset])
   const appointmentDate = useMemo(() => toApiDate(appointmentDateObj, venueTimezone), [appointmentDateObj, venueTimezone])
-  const appointmentDuration = product?.duration ?? 60
+  const modifierDelta = modifierDurationDelta(product, selectedModifiers)
+  const matchingBaseDuration = product && baseDurationOverrideRef.current?.productId === product.id
+    ? baseDurationOverrideRef.current.duration
+    : null
+  const appointmentBaseDuration = matchingBaseDuration ?? product?.duration ?? 60
+  const appointmentDuration = appointmentBaseDuration + modifierDelta
+  const staffPickerEnabled = !isClass && venueQuery.data?.staffSelection?.enabled === true
+  const eligibleStaff = product ? (venueQuery.data?.staffSelection?.staffByProductId[product.id] ?? []) : []
+  const staffSelectionBlocked = staffPickerEnabled && eligibleStaff.length === 0
+  const selectedModifiersValid = isClass || modifiersAreValid(product, selectedModifiers)
+
+  function storeAppointmentHold(holdId: string, expiresAt: string, staffId?: string) {
+    appointmentHoldIdRef.current = holdId
+    setAppointmentHoldId(holdId)
+    setAppointmentHoldExpiresAt(Date.parse(expiresAt))
+    setHeldStaffId(staffId ?? null)
+    setHoldReleaseFailed(false)
+  }
+
+  function clearAppointmentHold(expectedHoldId?: string) {
+    if (expectedHoldId && appointmentHoldIdRef.current !== expectedHoldId) return
+    appointmentHoldIdRef.current = null
+    setAppointmentHoldId(null)
+    setAppointmentHoldExpiresAt(null)
+    setHeldStaffId(null)
+    setHoldReleaseFailed(false)
+  }
+
+  async function releaseCurrentAppointmentHold(): Promise<boolean> {
+    const holdId = appointmentHoldIdRef.current
+    if (!holdId) {
+      setHoldReleaseFailed(false)
+      return true
+    }
+    if (activeHoldReleaseRef.current) return activeHoldReleaseRef.current
+
+    const releasePromise = releaseAppointmentHold(slug, holdId)
+      .then(() => {
+        clearAppointmentHold(holdId)
+        return true
+      })
+      .catch(() => {
+        setHoldReleaseFailed(true)
+        Alert.alert('No pudimos liberar el horario', 'Reintenta antes de elegir otra opción.')
+        return false
+      })
+      .finally(() => {
+        activeHoldReleaseRef.current = null
+      })
+    activeHoldReleaseRef.current = releasePromise
+    return releasePromise
+  }
+
+  async function runAfterHoldRelease(action: () => void | Promise<void>): Promise<boolean> {
+    if (!(await releaseCurrentAppointmentHold())) {
+      pendingHoldReleaseActionRef.current = action
+      return false
+    }
+    pendingHoldReleaseActionRef.current = null
+    await action()
+    return true
+  }
+
+  async function retryPendingHoldRelease() {
+    const action = pendingHoldReleaseActionRef.current
+    if (!(await releaseCurrentAppointmentHold())) return
+    pendingHoldReleaseActionRef.current = null
+    if (action) await action()
+  }
+
+  async function handleProductChange(nextProduct: Product) {
+    if (nextProduct.id === product?.id) return
+    await runAfterHoldRelease(() => {
+      baseDurationOverrideRef.current = null
+      setSelectedProduct(nextProduct)
+    })
+  }
+
+  async function handleStaffChange(staffId: string | null) {
+    if (staffId === selectedStaffId) return
+    await runAfterHoldRelease(() => {
+      setSelectedStaffId(staffId)
+      setSelectedAppointmentSlotKey(null)
+      setHeldStaffId(null)
+    })
+  }
+
+  async function handleModifierChange(next: ModifierSelection[]) {
+    await runAfterHoldRelease(() => {
+      setSelectedModifiers(next)
+      setSelectedAppointmentSlotKey(null)
+      setHeldStaffId(null)
+    })
+  }
+
+  async function handleAppointmentDateChange(offset: number) {
+    if (offset === appointmentDateOffset) return
+    await runAfterHoldRelease(() => setAppointmentDateOffset(offset))
+  }
 
   useEffect(() => {
     setSelectedClassSessionId(null)
     setSelectedAppointmentSlotKey(null)
     setSelectedCreditBalanceId(null)
+    setSelectedStaffId(null)
+    setSelectedModifiers([])
+    setHeldStaffId(null)
   }, [product?.id])
+
+  useEffect(() => {
+    if (!appointmentHoldExpiresAt) return
+    const delay = appointmentHoldExpiresAt - Date.now()
+    if (delay <= 0) {
+      clearAppointmentHold()
+      setSelectedAppointmentSlotKey(null)
+      return
+    }
+    const timeout = setTimeout(() => {
+      clearAppointmentHold()
+      setSelectedAppointmentSlotKey(null)
+      Alert.alert('El horario expiró', 'Selecciona un horario disponible nuevamente.')
+    }, delay)
+    return () => clearTimeout(timeout)
+  }, [appointmentHoldExpiresAt])
+
+  useEffect(() => () => {
+    const holdId = appointmentHoldIdRef.current
+    if (holdId) void releaseAppointmentHold(slug, holdId).catch(() => undefined)
+  }, [slug])
 
   const classAvailabilityQuery = useQuery({
     queryKey: ['class-availability', slug, classDate, product?.id],
@@ -184,10 +331,19 @@ export default function VenueDetailScreen() {
   })
 
   const appointmentAvailabilityQuery = useQuery({
-    queryKey: ['appointment-availability', slug, appointmentDate, product?.id, appointmentDuration, seats],
+    queryKey: ['appointment-availability', slug, appointmentDate, product?.id, appointmentDuration, seats, selectedStaffId],
     queryFn: () =>
-      getAvailability(slug, { date: appointmentDate, duration: appointmentDuration, partySize: seats, productId: product?.id }),
-    enabled: Boolean(slug && !isClass && product?.id),
+      getAvailability(slug, {
+        date: appointmentDate,
+        duration: appointmentDuration,
+        partySize: seats,
+        productId: product?.id,
+        ...(venueQuery.data?.appointmentWindowSemantics === 'base' && product?.id
+          ? { productIds: [product.id], windowSemantics: 'base' as const }
+          : {}),
+        ...(selectedStaffId ? { staffId: selectedStaffId } : {}),
+      }),
+    enabled: Boolean(slug && !isClass && product?.id && !staffSelectionBlocked && selectedModifiersValid),
   })
 
   const creditPacksQuery = useQuery({
@@ -270,15 +426,117 @@ export default function VenueDetailScreen() {
     setSelectedCreditBalanceId(null)
   }, [seats])
 
-  const updatePartySize = (value: string) => {
+  const updatePartySize = async (value: string) => {
     const digits = value.replace(/\D/g, '')
+    let nextValue = ''
     if (!digits) {
-      setPartySize('')
+      nextValue = ''
+    } else {
+      const remaining = selectedSlot?.remaining
+      const maxSeats = remaining && remaining > 0 ? remaining : 20
+      nextValue = String(Math.min(Math.max(Number(digits), 1), maxSeats))
+    }
+    if (nextValue === partySize) return
+    if (isClass) {
+      setPartySize(nextValue)
       return
     }
-    const remaining = selectedSlot?.remaining
-    const maxSeats = remaining && remaining > 0 ? remaining : 20
-    setPartySize(String(Math.min(Math.max(Number(digits), 1), maxSeats)))
+    await runAfterHoldRelease(() => setPartySize(nextValue))
+  }
+
+  async function recoverAppointmentWindow(error: unknown) {
+    setSelectedAppointmentSlotKey(null)
+    const recover = async () => {
+      const expectedBaseDuration = appointmentWindowExpectedBase(error)
+      const refreshed = await venueQuery.refetch()
+      const freshVenue = refreshed.data
+      if (!freshVenue) {
+        Alert.alert('No pudimos actualizar el servicio', 'Intenta actualizar la pantalla nuevamente.')
+        return
+      }
+
+      const previousProductId = product?.id
+      const freshProduct = freshVenue.products.find(item => item.id === previousProductId) ?? freshVenue.products[0] ?? null
+      if (!freshProduct) {
+        setSelectedProduct(null)
+        setSelectedModifiers([])
+        setSelectedStaffId(null)
+        baseDurationOverrideRef.current = null
+        Alert.alert('Servicio no disponible', 'El servicio elegido ya no está disponible.')
+        return
+      }
+
+      setSelectedProduct(freshProduct)
+      setSelectedModifiers(current => reconcileModifiers(freshProduct, current))
+      const freshStaff = freshVenue.staffSelection?.enabled
+        ? (freshVenue.staffSelection.staffByProductId[freshProduct.id] ?? [])
+        : []
+      setSelectedStaffId(current => current && freshStaff.some(member => member.id === current) ? current : null)
+      baseDurationOverrideRef.current = freshProduct.duration == null && expectedBaseDuration
+        ? { productId: freshProduct.id, duration: expectedBaseDuration }
+        : null
+      await queryClient.invalidateQueries({ queryKey: ['appointment-availability', slug] })
+      Alert.alert('El servicio cambió', 'Actualizamos sus opciones. Elige un horario disponible nuevamente.')
+    }
+
+    await runAfterHoldRelease(recover)
+  }
+
+  async function selectAppointmentSlot(slot: { startsAt: string; endsAt: string }) {
+    if (!product || appointmentHoldPending || staffSelectionBlocked || !selectedModifiersValid) return
+    const slotKey = `${slot.startsAt}-${slot.endsAt}`
+    if (selectedAppointmentSlotKey === slotKey) {
+      await runAfterHoldRelease(() => setSelectedAppointmentSlotKey(null))
+      return
+    }
+
+    const mintHold = async () => {
+      setAppointmentHoldPending(true)
+      try {
+        const usesBaseWindow = venueQuery.data?.appointmentWindowSemantics === 'base'
+        const window = usesBaseWindow
+          ? baseWindowFromFinalSlot(slot, product, selectedModifiers)
+          : {
+              startsAt: new Date(slot.startsAt),
+              endsAt: new Date(slot.endsAt),
+              duration: appointmentDuration,
+            }
+        const hold = await createAppointmentHold(slug, {
+          startsAt: window.startsAt,
+          endsAt: window.endsAt,
+          productIds: [product.id],
+          partySize: seats,
+          ...(selectedStaffId ? { staffId: selectedStaffId } : {}),
+          ...(selectedModifiers.length > 0 ? { modifierSelections: selectedModifiers } : {}),
+          ...(usesBaseWindow ? { windowSemantics: 'base' as const } : {}),
+        })
+        storeAppointmentHold(hold.holdId, hold.expiresAt, hold.staffId)
+        setSelectedAppointmentSlotKey(slotKey)
+      } catch (error) {
+        const apiError = error as ApiErrorShape
+        if (apiError.code === 'APPOINTMENT_WINDOW_CHANGED') {
+          await recoverAppointmentWindow(error)
+          return
+        }
+        if (apiError.status === 404) {
+          // Old servers do not expose appointment holds. Keep the legacy
+          // direct-create flow until the capability-bearing API is deployed.
+          setSelectedAppointmentSlotKey(slotKey)
+          return
+        }
+        if (apiError.status === 409) {
+          setSelectedAppointmentSlotKey(null)
+          await appointmentAvailabilityQuery.refetch()
+          Alert.alert('Horario no disponible', 'Alguien tomó ese horario. Elige otro disponible.')
+          return
+        }
+        Alert.alert('No pudimos apartar el horario', queryErrorMessage(error, 'Intenta de nuevo.'))
+      } finally {
+        setAppointmentHoldPending(false)
+      }
+    }
+
+    await runAfterHoldRelease(mintHold)
   }
 
   const goToCredits = () => {
@@ -335,28 +593,54 @@ export default function VenueDetailScreen() {
     if (!partySize || Number(partySize) < 1) missing.push('personas')
     if (isClass && !selectedSlot) missing.push('sesión')
     if (!isClass && !selectedAppointmentSlot) missing.push('horario')
+    if (!isClass && staffSelectionBlocked) missing.push('profesionista disponible')
+    if (!isClass && !selectedModifiersValid) missing.push('complementos requeridos')
+    if (!isClass && holdReleaseFailed) missing.push('liberación del horario')
     if (isClass && product?.requireCreditForBooking && !selectedCredit?.sufficient) missing.push('crédito suficiente')
     return missing
   }
 
-  const canChooseCreditOrReserve = Boolean(product && partySize && Number(partySize) >= 1 && (isClass ? selectedSlot : selectedAppointmentSlot))
+  const canChooseCreditOrReserve = Boolean(
+    product &&
+    partySize &&
+    Number(partySize) >= 1 &&
+    (isClass ? selectedSlot : selectedAppointmentSlot) &&
+    (isClass || (!staffSelectionBlocked && selectedModifiersValid && !holdReleaseFailed)),
+  )
   const canSubmitReservation = canChooseCreditOrReserve && (!isClass || !product?.requireCreditForBooking || selectedCredit?.sufficient)
   const needsCredit = Boolean(isClass && product?.requireCreditForBooking && !selectedCredit?.sufficient)
 
   const reservationMutation = useMutation({
-    mutationFn: (phoneOverride?: string) =>
-      createReservation(token!, slug, {
-        startsAt: isClass ? undefined : new Date(selectedAppointmentSlot!.startsAt),
-        endsAt: isClass ? undefined : new Date(selectedAppointmentSlot!.endsAt),
-        duration: isClass ? undefined : appointmentDuration,
+    mutationFn: (phoneOverride?: string) => {
+      const usesBaseWindow = !isClass && venueQuery.data?.appointmentWindowSemantics === 'base'
+      const appointmentWindow = !isClass && selectedAppointmentSlot && product
+        ? usesBaseWindow
+          ? baseWindowFromFinalSlot(selectedAppointmentSlot, product, selectedModifiers)
+          : {
+              startsAt: new Date(selectedAppointmentSlot.startsAt),
+              endsAt: new Date(selectedAppointmentSlot.endsAt),
+              duration: appointmentDuration,
+            }
+        : null
+      return createReservation(token!, slug, {
+        startsAt: appointmentWindow?.startsAt,
+        endsAt: appointmentWindow?.endsAt,
+        duration: appointmentWindow?.duration,
         guestPhone: phoneOverride?.trim() || phone.trim() || undefined,
         partySize: seats,
         productId: product?.id,
+        ...(usesBaseWindow && product ? { productIds: [product.id], windowSemantics: 'base' as const } : {}),
+        ...(!isClass && selectedStaffId ? { staffId: selectedStaffId } : {}),
+        ...(!isClass && selectedModifiers.length > 0 ? { modifierSelections: selectedModifiers } : {}),
+        ...(!isClass && appointmentHoldId ? { holdId: appointmentHoldId } : {}),
         classSessionId: isClass ? selectedClassSessionId ?? undefined : undefined,
         creditItemBalanceId: isClass ? selectedCreditBalanceId ?? undefined : undefined,
         specialRequests: notes.trim() || undefined,
-      }),
+      })
+    },
     onSuccess: async result => {
+      clearAppointmentHold()
+      pendingHoldReleaseActionRef.current = null
       const detailParams = {
         pathname: '/reservations/[cancelSecret]' as const,
         params: { cancelSecret: result.cancelSecret, venueSlug: slug, backTo: 'reservations' },
@@ -413,7 +697,26 @@ export default function VenueDetailScreen() {
 
       Alert.alert('Reserva creada', `Código: ${result.confirmationCode}`, [{ text: 'Ver reserva', onPress: () => router.replace(detailParams) }])
     },
-    onError: error => {
+    onError: async error => {
+      const apiError = error as ApiErrorShape
+      if (!isClass && apiError.code === 'APPOINTMENT_WINDOW_CHANGED') {
+        await recoverAppointmentWindow(error)
+        return
+      }
+      if (apiError.status === 409) {
+        const recoverConflict = async () => {
+          if (isClass) {
+            setSelectedClassSessionId(null)
+            await classAvailabilityQuery.refetch()
+          } else {
+            setSelectedAppointmentSlotKey(null)
+            await appointmentAvailabilityQuery.refetch()
+          }
+          Alert.alert('Horario no disponible', 'Ese horario cambió. Elige uno disponible nuevamente.')
+        }
+        await runAfterHoldRelease(recoverConflict)
+        return
+      }
       const message = error instanceof Error ? error.message : 'Intenta de nuevo.'
       const userMessage = message.includes('validación') || message.includes('requeridos')
         ? 'Completa los datos requeridos.'
@@ -447,7 +750,8 @@ export default function VenueDetailScreen() {
   const venue = venueQuery.data
   const availableSlots = (classAvailabilityQuery.data?.slots ?? []).filter(slot => slot.available && slot.classSessionId)
   const availableAppointmentSlots = (appointmentAvailabilityQuery.data?.slots ?? []).filter(slot => slot.available)
-  const footerLabel = reservationMutation.isPending ? 'Reservando…' : needsCredit ? 'Elegir crédito' : 'Reservar'
+  const footerBusy = reservationMutation.isPending || appointmentHoldPending
+  const footerLabel = reservationMutation.isPending ? 'Reservando…' : appointmentHoldPending ? 'Apartando…' : needsCredit ? 'Elegir crédito' : 'Reservar'
 
   const isRefreshingVenue =
     venueQuery.isRefetching ||
@@ -531,7 +835,7 @@ export default function VenueDetailScreen() {
                   key={item.id}
                   accessibilityRole="button"
                   accessibilityState={{ selected }}
-                  onPress={() => setSelectedProduct(item)}
+                  onPress={() => { void handleProductChange(item) }}
                   style={[
                     styles.productTile,
                     selected ? { backgroundColor: accent.ink, borderColor: accent.ink } : null,
@@ -549,43 +853,35 @@ export default function VenueDetailScreen() {
           </ScrollView>
         </View>
 
-        {/* PARTY SIZE + NOTES */}
-        <View style={styles.section}>
-          <View style={styles.sectionText}>
-            <Kicker color={colors.muted}>Detalles</Kicker>
-            <Heading level="title">Tu reserva</Heading>
-          </View>
-          <View style={styles.formRow}>
-            <View style={styles.partySizeBox}>
-              <Text style={styles.inputLabel}>Personas</Text>
-              <TextInput
-                value={partySize}
-                onChangeText={updatePartySize}
-                placeholder="1"
-                placeholderTextColor={colors.muted}
-                keyboardType="number-pad"
-                returnKeyType="done"
-                inputAccessoryViewID={undefined}
-                onSubmitEditing={Keyboard.dismiss}
-                onEndEditing={Keyboard.dismiss}
-                maxLength={2}
-                style={styles.partySizeInput}
-              />
+        {!isClass && product ? (
+          <AppointmentModifierPicker
+            product={product}
+            selections={selectedModifiers}
+            accent={accent}
+            onChange={handleModifierChange}
+          />
+        ) : null}
+
+        {staffPickerEnabled ? (
+          <AppointmentStaffPicker
+            staff={eligibleStaff}
+            selectedStaffId={selectedStaffId}
+            assignedStaffId={heldStaffId}
+            vertical={vertical}
+            accent={accent}
+            onChange={handleStaffChange}
+          />
+        ) : null}
+
+        {holdReleaseFailed ? (
+          <Pressable accessibilityRole="button" onPress={() => { void retryPendingHoldRelease() }} style={[styles.notice, styles.releaseWarning]}>
+            <View style={styles.noticeText}>
+              <Text style={[styles.noticeTitle, { color: colors.danger }]}>No se liberó el horario anterior</Text>
+              <BodyText variant="bodySmall" color={colors.textSubtle}>Toca para reintentar antes de continuar.</BodyText>
             </View>
-            <View style={styles.notesBox}>
-              <Text style={styles.inputLabel}>Notas (opcional)</Text>
-              <TextInput
-                value={notes}
-                onChangeText={setNotes}
-                placeholder="Alergias, preferencias o instrucciones"
-                placeholderTextColor={colors.muted}
-                multiline
-                returnKeyType="done"
-                style={styles.notesInput}
-              />
-            </View>
-          </View>
-        </View>
+            <Text style={[styles.noticeArrow, { color: colors.danger }]}>↻</Text>
+          </Pressable>
+        ) : null}
 
         {/* CLASSES — sessions */}
         {isClass ? (
@@ -702,7 +998,7 @@ export default function VenueDetailScreen() {
                     key={option.offset}
                     accessibilityRole="button"
                     accessibilityState={{ selected }}
-                    onPress={() => setAppointmentDateOffset(option.offset)}
+                    onPress={() => { void handleAppointmentDateChange(option.offset) }}
                     style={[styles.dateChip, selected ? { backgroundColor: accent.ink, borderColor: accent.ink } : null]}
                   >
                     <Text style={[styles.dateChipLabel, selected ? styles.onPrimaryText : null]}>{option.label}</Text>
@@ -711,7 +1007,7 @@ export default function VenueDetailScreen() {
                   </Pressable>
                 )
               })}
-              <Pressable accessibilityRole="button" accessibilityLabel="Ver más días" onPress={() => setAppointmentDateOffset(v => Math.min(maxAdvanceDays, v + 1))} style={styles.dateChipMore}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Ver más días" onPress={() => { void handleAppointmentDateChange(Math.min(maxAdvanceDays, appointmentDateOffset + 1)) }} style={styles.dateChipMore}>
                 <Text style={styles.dateChipMoreLabel}>Más</Text>
                 <Text style={styles.dateChipMoreSub}>días</Text>
               </Pressable>
@@ -738,9 +1034,10 @@ export default function VenueDetailScreen() {
                   <Pressable
                     key={slotKey}
                     accessibilityRole="button"
-                    accessibilityState={{ selected }}
-                    onPress={() => setSelectedAppointmentSlotKey(slotKey)}
-                    style={[styles.slotCard, selected ? { borderColor: accent.ink, backgroundColor: accent.tint } : null]}
+                    accessibilityState={{ selected, disabled: appointmentHoldPending }}
+                    disabled={appointmentHoldPending}
+                    onPress={() => { void selectAppointmentSlot(slot) }}
+                    style={[styles.slotCard, selected ? { borderColor: accent.ink, backgroundColor: accent.tint } : null, appointmentHoldPending ? styles.disabled : null]}
                   >
                     <View>
                       <Text style={[styles.slotTime, selected ? { color: accent.deep } : null]}>{formatSlot(slot.startsAt, slot.endsAt, venueTimezone)}</Text>
@@ -755,6 +1052,44 @@ export default function VenueDetailScreen() {
             </View>
           </View>
         ) : null}
+
+        {/* Contact data comes after the service/staff/date/time choice. */}
+        <View style={styles.section}>
+          <View style={styles.sectionText}>
+            <Kicker color={colors.muted}>Detalles</Kicker>
+            <Heading level="title">Tu reserva</Heading>
+          </View>
+          <View style={styles.formRow}>
+            <View style={styles.partySizeBox}>
+              <Text style={styles.inputLabel}>Personas</Text>
+              <TextInput
+                value={partySize}
+                onChangeText={value => { void updatePartySize(value) }}
+                placeholder="1"
+                placeholderTextColor={colors.muted}
+                keyboardType="number-pad"
+                returnKeyType="done"
+                inputAccessoryViewID={undefined}
+                onSubmitEditing={Keyboard.dismiss}
+                onEndEditing={Keyboard.dismiss}
+                maxLength={2}
+                style={styles.partySizeInput}
+              />
+            </View>
+            <View style={styles.notesBox}>
+              <Text style={styles.inputLabel}>Notas (opcional)</Text>
+              <TextInput
+                value={notes}
+                onChangeText={setNotes}
+                placeholder="Alergias, preferencias o instrucciones"
+                placeholderTextColor={colors.muted}
+                multiline
+                returnKeyType="done"
+                style={styles.notesInput}
+              />
+            </View>
+          </View>
+        </View>
       </ScrollView>
 
       {/* STICKY FOOTER */}
@@ -774,8 +1109,8 @@ export default function VenueDetailScreen() {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={footerLabel}
-          accessibilityState={{ disabled: reservationMutation.isPending, busy: reservationMutation.isPending }}
-          disabled={reservationMutation.isPending}
+          accessibilityState={{ disabled: footerBusy, busy: footerBusy }}
+          disabled={footerBusy}
           onPress={() => {
             if (!canChooseCreditOrReserve) {
               const missing = missingFields()
@@ -807,8 +1142,8 @@ export default function VenueDetailScreen() {
           style={({ pressed }) => [
             styles.footerCta,
             { backgroundColor: accent.ink },
-            pressed && !reservationMutation.isPending ? styles.pressed : null,
-            reservationMutation.isPending ? styles.disabled : null,
+            pressed && !footerBusy ? styles.pressed : null,
+            footerBusy ? styles.disabled : null,
           ]}
         >
           <Text style={styles.footerCtaText}>{footerLabel}</Text>
@@ -1213,6 +1548,11 @@ const styles = StyleSheet.create({
     gap: space.md,
     padding: space.md,
     borderRadius: 18,
+  },
+  releaseWarning: {
+    borderWidth: 1,
+    borderColor: colors.danger,
+    backgroundColor: colors.surface,
   },
   noticeText: {
     flex: 1,

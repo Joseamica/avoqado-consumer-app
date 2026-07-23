@@ -1,6 +1,7 @@
 import type {
   AuthProvider,
   AuthResponse,
+  AppointmentHoldResponse,
   CancelReservationResponse,
   ClassAvailabilityResponse,
   ConsumerCreditsResponse,
@@ -15,6 +16,7 @@ import type {
   VenueDetail,
   ReservationDepositCheckoutResponse,
   VenueSearchResponse,
+  ModifierSelection,
 } from './types'
 
 const API_BASE = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000/api/v1'
@@ -37,15 +39,21 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (!response.ok) {
     let message = `HTTP ${response.status}`
+    let payload: { message?: string; code?: string; details?: unknown } = {}
     try {
-      const payload = await response.json()
+      payload = await response.json()
       message = payload.message ?? message
     } catch {
       // Keep fallback.
     }
-    throw new Error(message)
+    throw Object.assign(new Error(message), {
+      status: response.status,
+      code: payload.code,
+      details: payload.details,
+    })
   }
 
+  if (response.status === 204) return undefined as T
   return response.json()
 }
 
@@ -85,6 +93,11 @@ export function createReservation(
     guestPhone?: string
     partySize?: number
     productId?: string
+    productIds?: string[]
+    staffId?: string
+    modifierSelections?: ModifierSelection[]
+    holdId?: string
+    windowSemantics?: 'base'
     classSessionId?: string
     creditItemBalanceId?: string
     specialRequests?: string
@@ -139,12 +152,42 @@ export function getClassAvailability(venueSlug: string, input: { date: string; p
   return request<ClassAvailabilityResponse>(`/public/venues/${venueSlug}/availability?${params.toString()}`)
 }
 
-export function getAvailability(venueSlug: string, input: { date: string; duration?: number; partySize?: number; productId?: string }) {
+export function getAvailability(venueSlug: string, input: {
+  date: string
+  duration?: number
+  partySize?: number
+  productId?: string
+  productIds?: string[]
+  staffId?: string
+  windowSemantics?: 'base'
+}) {
   const params = new URLSearchParams({ date: input.date })
   if (input.duration) params.set('duration', String(input.duration))
   if (input.partySize) params.set('partySize', String(input.partySize))
   if (input.productId) params.set('productId', input.productId)
+  if (input.productIds?.length) params.set('productIds', input.productIds.join(','))
+  if (input.staffId) params.set('staffId', input.staffId)
+  if (input.windowSemantics) params.set('windowSemantics', input.windowSemantics)
   return request<ClassAvailabilityResponse>(`/public/venues/${venueSlug}/availability?${params.toString()}`)
+}
+
+export function createAppointmentHold(venueSlug: string, input: {
+  startsAt: Date
+  endsAt: Date
+  productIds: string[]
+  partySize?: number
+  staffId?: string
+  modifierSelections?: ModifierSelection[]
+  windowSemantics?: 'base'
+}) {
+  return request<AppointmentHoldResponse>(`/public/venues/${venueSlug}/reservations/hold`, {
+    method: 'POST',
+    body: input,
+  })
+}
+
+export function releaseAppointmentHold(venueSlug: string, holdId: string) {
+  return request<void>(`/public/venues/${venueSlug}/reservations/hold/${holdId}`, { method: 'DELETE' })
 }
 
 export function getCreditPacks(venueSlug: string, productId?: string) {

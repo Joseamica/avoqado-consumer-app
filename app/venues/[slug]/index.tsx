@@ -30,6 +30,7 @@ import {
   getCreditPacks,
   getVenue,
   releaseAppointmentHold,
+  reservationCancelledMessage,
 } from '../../../src/api/client'
 import type { CreditBalanceItem, CreditPack, ModifierSelection, Product } from '../../../src/api/types'
 import {
@@ -653,10 +654,12 @@ export default function VenueDetailScreen() {
         if (paymentStatus === 'success') {
           const sessionId = getSessionIdFromReturnUrl((paymentResult as any).url)
           let finalized: Awaited<ReturnType<typeof finalizeReservationDepositCheckout>> | null = null
+          let cancelledMessage: string | null = null
           try {
             finalized = sessionId && token ? await finalizeReservationDepositCheckout(token, sessionId) : null
-          } catch {
+          } catch (error) {
             finalized = null
+            cancelledMessage = reservationCancelledMessage(error)
           }
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: ['consumer-reservations'] }),
@@ -669,6 +672,12 @@ export default function VenueDetailScreen() {
               venueSlug: finalized?.venueSlug ?? slug,
               backTo: 'reservations',
             },
+          }
+          if (cancelledMessage) {
+            Alert.alert('Reserva cancelada', cancelledMessage, [
+              { text: 'Ver reserva', onPress: () => router.replace(finalizedDetailParams) },
+            ])
+            return
           }
           if (finalized?.depositStatus === 'PAID') {
             Alert.alert('Pago confirmado', `Tu reserva quedó confirmada.\nCódigo: ${finalized.confirmationCode}`, [

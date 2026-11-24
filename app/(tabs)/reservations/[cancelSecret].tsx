@@ -8,6 +8,7 @@ import {
   createReservationDepositCheckout,
   finalizeReservationDepositCheckout,
   getReservationDetail,
+  reservationCancelledMessage,
 } from '../../../src/api/client'
 import { Avatar } from '../../../src/components/Avatar'
 import { BodyText } from '../../../src/components/BodyText'
@@ -129,15 +130,21 @@ export default function ReservationDetailScreen() {
       if (paymentStatus === 'success') {
         const sessionId = getSessionIdFromReturnUrl((paymentResult as any).url)
         let finalized: Awaited<ReturnType<typeof finalizeReservationDepositCheckout>> | null = null
+        let cancelledMessage: string | null = null
         try {
           finalized = sessionId && token ? await finalizeReservationDepositCheckout(token, sessionId) : null
-        } catch {
+        } catch (error) {
           finalized = null
+          cancelledMessage = reservationCancelledMessage(error)
         }
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ['reservation-detail', resolvedVenueSlug, cancelSecret] }),
           queryClient.invalidateQueries({ queryKey: ['consumer-reservations'] }),
         ])
+        if (cancelledMessage) {
+          Alert.alert('Reserva cancelada', cancelledMessage)
+          return
+        }
         if (finalized?.depositStatus === 'PAID') {
           Alert.alert('Pago confirmado', `Tu reserva quedó confirmada.\nCódigo: ${finalized.confirmationCode}`)
           return

@@ -144,6 +144,17 @@ export function finalizeReservationDepositCheckout(token: string, sessionId: str
   })
 }
 
+/**
+ * Si el servidor contestó que la reserva ya estaba cancelada al completarse el pago (409
+ * `RESERVATION_CANCELLED_DEPOSIT_REFUND`), el mensaje para la clienta; si no, null.
+ * Con null, la pantalla sigue con «Estamos confirmando tu depósito» (el aviso de Stripe puede llegar después).
+ */
+export function reservationCancelledMessage(error: unknown): string | null {
+  const e = error as { code?: unknown; message?: unknown } | null
+  if (e?.code !== 'RESERVATION_CANCELLED_DEPOSIT_REFUND') return null
+  return typeof e.message === 'string' && e.message ? e.message : 'Tu reserva está cancelada. El negocio te devuelve el depósito.'
+}
+
 export function getClassAvailability(venueSlug: string, input: { date: string; productId: string }) {
   const params = new URLSearchParams({
     date: input.date,
